@@ -1,5 +1,5 @@
 # quic-stream-scheduling
-QUIC Stream Scheduling Module for quiche
+Modified QUIC stream scheduling for [quiche](https://github.com/cloudflare/quiche)
 
 ## Introduction
 
