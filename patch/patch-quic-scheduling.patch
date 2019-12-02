@@ -1,0 +1,680 @@
+diff --git a/README.md b/README.md
+index 273fc81..6955b21 100644
+--- a/README.md
++++ b/README.md
+@@ -1,12 +1,327 @@
+-Modification of Cloudflare's [quiche] for testing various QUIC stream scheduling.
++![quiche](quiche.svg)
++
++[![crates.io](https://img.shields.io/crates/v/quiche.svg)](https://crates.io/crates/quiche)
++[![docs.rs](https://docs.rs/quiche/badge.svg)](https://docs.rs/quiche)
++[![license](https://img.shields.io/github/license/cloudflare/quiche.svg)](https://opensource.org/licenses/BSD-2-Clause)
++[![build](https://travis-ci.com/cloudflare/quiche.svg?branch=master)](https://travis-ci.com/cloudflare/quiche)
+ 
+ [quiche] is an implementation of the QUIC transport protocol and HTTP/3 as
+ specified by the [IETF]. It provides a low level API for processing QUIC packets
+ and handling connection state. The application is responsible for providing I/O
+ (e.g. sockets handling) as well as an event loop with support for timers.
+ 
++A live QUIC server based on quiche is available at ``https://quic.tech:4433/``,
++and an HTTP/3 one at ``https://quic.tech:8443/``, that can be used for
++experimentation.
++
++For more information on how quiche came about and some insights into its design
++you can read a [post] on Cloudflare's (where this library is used in production)
++blog that goes into some more detail.
++
+ [quiche]: https://docs.quic.tech/quiche/
+ [ietf]: https://quicwg.org/
++[post]: https://blog.cloudflare.com/enjoy-a-slice-of-quic-and-rust/
++
++Getting Started
++---------------
++
++### Connection setup
++
++The first step in establishing a QUIC connection using quiche is creating a
++configuration object:
++
++```rust
++let config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
++```
++
++This is shared among multiple connections and can be used to configure a
++QUIC endpoint.
++
++On the client-side the [`connect()`] utility function can be used to create
++a new connection, while [`accept()`] is for servers:
++
++```rust
++// Client connection.
++let conn = quiche::connect(Some(&server_name), &scid, &mut config)?;
++
++// Server connection.
++let conn = quiche::accept(&scid, None, &mut config)?;
++```
++
++### Handling incoming packets
++
++Using the connection's [`recv()`] method the application can process
++incoming packets that belong to that connection from the network:
++
++```rust
++loop {
++    let read = socket.recv(&mut buf).unwrap();
++
++    let read = match conn.recv(&mut buf[..read]) {
++        Ok(v) => v,
++
++        Err(quiche::Error::Done) => {
++            // Done reading.
++            break;
++        },
++
++        Err(e) => {
++            // An error occurred, handle it.
++            break;
++        },
++    };
++}
++```
++
++### Generating outgoing packets
++
++Outgoing packet are generated using the connection's [`send()`] method
++instead:
++
++```rust
++loop {
++    let write = match conn.send(&mut out) {
++        Ok(v) => v,
++
++        Err(quiche::Error::Done) => {
++            // Done writing.
++            break;
++        },
++
++        Err(e) => {
++            // An error occurred, handle it.
++            break;
++        },
++    };
++
++    socket.send(&out[..write]).unwrap();
++}
++```
++
++When packets are sent, the application is responsible for maintaining a
++timer to react to time-based connection events. The timer expiration can be
++obtained using the connection's [`timeout()`] method.
++
++```rust
++let timeout = conn.timeout();
++```
++
++The application is responsible for providing a timer implementation, which
++can be specific to the operating system or networking framework used. When
++a timer expires, the connection's [`on_timeout()`] method should be called,
++after which additional packets might need to be sent on the network:
++
++```rust
++// Timeout expired, handle it.
++conn.on_timeout();
++
++// Send more packets as needed after timeout.
++loop {
++    let write = match conn.send(&mut out) {
++        Ok(v) => v,
++
++        Err(quiche::Error::Done) => {
++            // Done writing.
++            break;
++        },
++
++        Err(e) => {
++            // An error occurred, handle it.
++            break;
++        },
++    };
++
++    socket.send(&out[..write]).unwrap();
++}
++```
++
++### Sending and receiving stream data
++
++After some back and forth, the connection will complete its handshake and
++will be ready for sending or receiving application data.
++
++Data can be sent on a stream by using the [`stream_send()`] method:
++
++```rust
++if conn.is_established() {
++    // Handshake completed, send some data on stream 0.
++    conn.stream_send(0, b"hello", true)?;
++}
++```
++
++The application can check whether there are any readable streams by using
++the connection's [`readable()`] method, which returns an iterator over all
++the streams that have outstanding data to read.
++
++The [`stream_recv()`] method can then be used to retrieve the application
++data from the readable stream:
++
++```rust
++if conn.is_established() {
++    // Iterate over readable streams.
++    for stream_id in conn.readable() {
++        // Stream is readable, read until there's no more data.
++        while let Ok((read, fin)) = conn.stream_recv(stream_id, &mut buf) {
++            println!("Got {} bytes on stream {}", read, stream_id);
++        }
++    }
++}
++```
++
++### HTTP/3
++
++The quiche [HTTP/3 module] provides a high level API for sending and
++receiving HTTP requests and responses on top of the QUIC transport protocol.
++
++[`connect()`]: https://docs.quic.tech/quiche/fn.connect.html
++[`accept()`]: https://docs.quic.tech/quiche/fn.accept.html
++[`recv()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.recv
++[`send()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.send
++[`timeout()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.timeout
++[`on_timeout()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.on_timeout
++[`stream_send()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.stream_send
++[`readable()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.readable
++[`stream_recv()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.stream_recv
++[HTTP/3 module]: https://docs.quic.tech/quiche/h3/index.html
++
++Have a look at the [examples/] directory for more complete examples on how to use
++the quiche API, including examples on how to use quiche in C/C++ applications
++(see below for more information).
++
++[examples/]: examples/
++
++Calling quiche from C/C++
++-------------------------
++
++quiche exposes a [thin C API] on top of the Rust API that can be used to more
++easily integrate quiche into C/C++ applications (as well as in other languages
++that allow calling C APIs via some form of FFI). The C API follows the same
++design of the Rust one, modulo the constraints imposed by the C language itself.
++
++When running ``cargo build``, a static library called ``libquiche.a`` will be
++built automatically alongside the Rust one. This is fully stand-alone and can
++be linked directly into C/C++ applications.
++
++[thin C API]: https://github.com/cloudflare/quiche/blob/master/include/quiche.h
++
++Building
++--------
++
++quiche requires Rust 1.39 or later to build. The latest stable Rust release can
++be installed using [rustup](https://rustup.rs/).
++
++Once the Rust build environment is setup, the quiche source code can be fetched
++using git:
++
++```bash
++ $ git clone --recursive https://github.com/cloudflare/quiche
++```
++
++and then built using cargo:
++
++```bash
++ $ cargo build --examples
++```
++
++cargo can also be used to run the testsuite:
++
++```bash
++ $ cargo test
++```
++
++Note that [BoringSSL], which is used to implement QUIC's cryptographic handshake
++based on TLS, needs to be built and linked to quiche. This is done automatically
++when building quiche using cargo, but requires the `cmake`, `go` and `perl`
++commands to be available during the build process. On Windows you also need
++[NASM](https://www.nasm.us/). The 
++[official BoringSSL documentation](https://github.com/google/boringssl/blob/master/BUILDING.md)
++has more details.
++
++In alternative you can use your own custom build of BoringSSL by configuring
++the BoringSSL directory with the ``QUICHE_BSSL_PATH`` environment variable:
++
++```bash
++ $ QUICHE_BSSL_PATH="/path/to/boringssl" cargo build --examples
++```
++
++[BoringSSL]: https://boringssl.googlesource.com/boringssl/
++
++### Building for Android
++
++To build quiche for Android, you need the following:
++
++- Install Android NDK (13b or higher), using Android Studio or directly.
++- Set `ANDROID_NDK_HOME` environment variable to NDK path, e.g. using bash:
++
++```bash
++ $ export ANDROID_NDK_HOME=/usr/local/share/android-ndk
++```
++
++- Install the Rust toolchain for Android architectures:
++
++```bash
++ $ rustup target add aarch64-linux-android arm-linux-androideabi armv7-linux-androideabi i686-linux-android
++```
++
++Then, to prepare the cross-compiling toolchain, run the following command:
++
++```bash
++ $ tools/setup_android.sh
++```
++
++It will create a standalone toolchain for arm64/arm/x86 architectures under the
++`$TOOLCHAIN_DIR/arch` directory. If you didn't set `TOOLCHAIN_DIR` environment
++variable, the current directory will be used. Note that the minimum API level is
++21 for all target architectures.
++
++After it run successfully, run the following script to build libquiche:
++
++```bash
++ $ tools/build_android.sh
++```
++
++It will build binaries for aarch64, armv7 and i686. You can pass parameters to
++this script for cargo build. For example if you want to build a release binary
++with verbose logs, do the following:
++
++```bash
++ $ tools/build_android.sh --release -vv
++```
++
++### Building for iOS
++
++To build quiche for iOS, you need the following:
++
++- Install Xcode command-line tools. You can install them with Xcode or with the
++  following command:
++
++```bash
++ $ xcode-select --install
++```
++
++- Install the Rust toolchain for iOS architectures:
++
++```bash
++ $ rustup target add aarch64-apple-ios armv7-apple-ios armv7s-apple-ios x86_64-apple-ios i386-apple-ios
++```
++
++- Install `cargo-lipo`:
++
++```bash
++ $ cargo install cargo-lipo
++```
++
++To build libquiche, run the following command:
++
++```bash
++ $ cargo lipo
++```
++
++or
++
++```bash
++ $ cargo lipo --release
++```
+ 
+ Copyright
+ ---------
+diff --git a/examples/http3-client.rs b/examples/http3-client.rs
+index 93eef05..7129f5c 100644
+--- a/examples/http3-client.rs
++++ b/examples/http3-client.rs
+@@ -45,9 +45,8 @@ Options:
+   --wire-version VERSION   The version number to send to the server [default: babababa].
+   --no-verify              Don't verify server's certificate.
+   --no-grease              Don't send GREASE.
+-  --no-print               Don't print the content.
+   -H --header HEADER ...   Add a request header.
+-  -n --requests REQUESTS   Send the given number of identical requests [default: 10].
++  -n --requests REQUESTS   Send the given number of identical requests [default: 1].
+   -h --help                Show this screen.
+ ";
+ 
+@@ -63,7 +62,6 @@ fn main() {
+         .and_then(|dopt| dopt.parse())
+         .unwrap_or_else(|e| e.exit());
+ 
+-    
+     let max_data = args.get_str("--max-data");
+     let max_data = u64::from_str_radix(max_data, 10).unwrap();
+ 
+@@ -76,7 +74,7 @@ fn main() {
+     let url = url::Url::parse(args.get_str("URL")).unwrap();
+ 
+     // Request headers (can be multiple).
+-    //let req_headers = args.get_vec("--header");
++    let req_headers = args.get_vec("--header");
+ 
+     let reqs_count = args.get_str("--requests");
+     let reqs_count = u64::from_str_radix(reqs_count, 10).unwrap();
+@@ -174,44 +172,31 @@ fn main() {
+ 
+     let h3_config = quiche::h3::Config::new().unwrap();
+ 
+-    let mut reqs = Vec::new();
+-    for i in 0..10 {
+-        let h: [quiche::h3::Header; 5] = [
+-            quiche::h3::Header::new(":method", "GET"),
+-            quiche::h3::Header::new(":scheme", url.scheme()),
+-            quiche::h3::Header::new(":authority", url.host_str().unwrap()),
+-            quiche::h3::Header::new(":path", &format!("/{}.res", i)),
+-            quiche::h3::Header::new("user-agent", "quiche"),
+-        ];
+-        reqs.push(h);
+-        //paths.push(String::from(format!("/{}.res", i)));
+-    }
+-
+-    // // Prepare request.
+-    // let mut path = String::from(url.path());
+-
+-    // if let Some(query) = url.query() {
+-    //     path.push('?');
+-    //     path.push_str(query);
+-    // }
++    // Prepare request.
++    let mut path = String::from(url.path());
+ 
+-    // let mut req = vec![
+-    //     quiche::h3::Header::new(":method", args.get_str("--method")),
+-    //     quiche::h3::Header::new(":scheme", url.scheme()),
+-    //     quiche::h3::Header::new(":authority", url.host_str().unwrap()),
+-    //     quiche::h3::Header::new(":path", &path),
+-    //     quiche::h3::Header::new("user-agent", "quiche"),
+-    // ];
++    if let Some(query) = url.query() {
++        path.push('?');
++        path.push_str(query);
++    }
+ 
+-    // // Add custom headers to the request.
+-    // for header in &req_headers {
+-    //     let header_split: Vec<&str> = header.splitn(2, ": ").collect();
+-    //     if header_split.len() != 2 {
+-    //         panic!("malformed header provided - \"{}\"", header);
+-    //     }
++    let mut req = vec![
++        quiche::h3::Header::new(":method", args.get_str("--method")),
++        quiche::h3::Header::new(":scheme", url.scheme()),
++        quiche::h3::Header::new(":authority", url.host_str().unwrap()),
++        quiche::h3::Header::new(":path", &path),
++        quiche::h3::Header::new("user-agent", "quiche"),
++    ];
++
++    // Add custom headers to the request.
++    for header in &req_headers {
++        let header_split: Vec<&str> = header.splitn(2, ": ").collect();
++        if header_split.len() != 2 {
++            panic!("malformed header provided - \"{}\"", header);
++        }
+ 
+-    //     req.push(quiche::h3::Header::new(header_split[0], header_split[1]));
+-    // }
++        req.push(quiche::h3::Header::new(header_split[0], header_split[1]));
++    }
+ 
+     let body = if args.get_bool("--body") {
+         std::fs::read(args.get_str("--body")).ok()
+@@ -219,12 +204,12 @@ fn main() {
+         None
+     };
+ 
+-    // if body.is_some() {
+-    //     req.push(quiche::h3::Header::new(
+-    //         "content-length",
+-    //         &body.as_ref().unwrap().len().to_string(),
+-    //     ));
+-    // }
++    if body.is_some() {
++        req.push(quiche::h3::Header::new(
++            "content-length",
++            &body.as_ref().unwrap().len().to_string(),
++        ));
++    }
+ 
+     let mut reqs_sent = 0;
+ 
+@@ -306,38 +291,37 @@ fn main() {
+         if let Some(h3_conn) = &mut http3_conn {
+             let mut reqs_done = 0;
+ 
+-            if reqs_sent < reqs_count {
+-                for req in &reqs {
+-    //                for _ in reqs_sent..reqs_count {
+-                        info!("sending HTTP request {:?}", req);
+-                        let s =
+-                            match h3_conn.send_request(&mut conn, req, body.is_none()) {
+-                                Ok(v) => v,
+-        
+-                                Err(quiche::h3::Error::TransportError(
+-                                    quiche::Error::StreamLimit,
+-                                )) => {
+-                                    debug!("not enough stream credits, retry later...");
+-                                    break;
+-                                },
+-        
+-                                Err(e) => {
+-                                    error!("failed to send request {:?}", e);
+-                                    break;
+-                                },
+-                            };
+-        
+-                        if let Some(body) = &body {
+-                            if let Err(e) = h3_conn.send_body(&mut conn, s, body, true) {
+-                                error!("failed to send request body {:?}", e);
+-                                break;
+-                            }
+-                        }
+-                        reqs_done += 1;
+-    //                }
++            for _ in reqs_sent..reqs_count {
++                info!("sending HTTP request {:?}", req);
++
++                let s =
++                    match h3_conn.send_request(&mut conn, &req, body.is_none()) {
++                        Ok(v) => v,
++
++                        Err(quiche::h3::Error::TransportError(
++                            quiche::Error::StreamLimit,
++                        )) => {
++                            debug!("not enough stream credits, retry later...");
++                            break;
++                        },
++
++                        Err(e) => {
++                            error!("failed to send request {:?}", e);
++                            break;
++                        },
++                    };
++
++                if let Some(body) = &body {
++                    if let Err(e) = h3_conn.send_body(&mut conn, s, body, true) {
++                        error!("failed to send request body {:?}", e);
++                        break;
++                    }
+                 }
+-                reqs_sent += reqs_done;
++
++                reqs_done += 1;
+             }
++
++            reqs_sent += reqs_done;
+         }
+ 
+         if let Some(http3_conn) = &mut http3_conn {
+@@ -360,11 +344,9 @@ fn main() {
+                                 read, stream_id
+                             );
+ 
+-                            if !args.get_bool("--no-print") {
+-                                print!("{}", unsafe {
+-                                    std::str::from_utf8_unchecked(&buf[..read])
+-                                });
+-                            }
++                            print!("{}", unsafe {
++                                std::str::from_utf8_unchecked(&buf[..read])
++                            });
+                         }
+                     },
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 74a8709..b1fb7ed 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1579,7 +1579,6 @@ impl Connection {
+ 
+                     let empty_fin = data.is_empty() && data.fin();
+ 
+-                    let data_len = data.len();
+                     stream.send.push(data)?;
+ 
+                     // If the stream is now flushable push it to the flushable
+@@ -1588,7 +1587,7 @@ impl Connection {
+                     // Consider the stream flushable also when we are sending a
+                     // zero-length frame that has the fin flag set.
+                     if (stream.is_flushable() || empty_fin) && !was_flushable {
+-                        self.streams.push_flushable(stream_id, data_len as u64);
++                        self.streams.push_flushable(stream_id);
+                     }
+                 },
+ 
+@@ -1871,8 +1870,7 @@ impl Connection {
+                     continue;
+                 }
+ 
+-                let data_len = stream_buf.len();
+-                self.tx_data += data_len as u64;
++                self.tx_data += stream_buf.len() as u64;
+ 
+                 let frame = frame::Frame::Stream {
+                     stream_id,
+@@ -1890,7 +1888,7 @@ impl Connection {
+                 // If the stream is still flushable, push it to the back of the
+                 // queue again.
+                 if stream.is_flushable() {
+-                    self.streams.push_flushable(stream_id, data_len as u64);
++                    self.streams.push_flushable(stream_id);
+                 }
+ 
+                 break;
+@@ -2130,7 +2128,7 @@ impl Connection {
+         // Consider the stream flushable also when we are sending a zero-length
+         // frame that has the fin flag set.
+         if (flushable || empty_fin) && !was_flushable {
+-            self.streams.push_flushable(stream_id, buf.len() as u64);
++            self.streams.push_flushable(stream_id);
+         }
+ 
+         if !writable {
+@@ -2702,13 +2700,12 @@ impl Connection {
+ 
+                 stream.send.update_max_data(max);
+ 
+-                let buf_len = stream.send.len;
+                 let writable = stream.is_writable();
+ 
+                 // If the stream is now flushable push it to the flushable queue,
+                 // but only if it wasn't already queued.
+                 if stream.is_flushable() && !was_flushable {
+-                    self.streams.push_flushable(stream_id, buf_len);
++                    self.streams.push_flushable(stream_id);
+                 }
+ 
+                 if writable {
+diff --git a/src/stream.rs b/src/stream.rs
+index f2eee72..9299622 100644
+--- a/src/stream.rs
++++ b/src/stream.rs
+@@ -30,8 +30,7 @@ use std::collections::hash_map;
+ use std::collections::BinaryHeap;
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+-//use std::collections::VecDeque;
+-use std::collections::BTreeMap;
++use std::collections::VecDeque;
+ 
+ use crate::Error;
+ use crate::Result;
+@@ -77,8 +76,7 @@ pub struct StreamMap {
+     /// enough flow control credits to send at least some of that data.
+     ///
+     /// Streams are added to the back of the list, and removed from the front.
+-    flushable: BTreeMap<u64, u64>,
+-    //flushable: VecDeque<(u64, u64)>,
++    flushable: VecDeque<u64>,
+ 
+     /// Set of stream IDs corresponding to streams that have outstanding data
+     /// to read. This is used to generate a `StreamIter` of streams without
+@@ -230,9 +228,8 @@ impl StreamMap {
+     /// Queueing a stream multiple times simultaneously means that it might be
+     /// unfairly scheduled more often than other streams, and might also cause
+     /// spurious cycles through the queue, so it should be avoided.
+-    pub fn push_flushable(&mut self, stream_id: u64, size: u64) {
+-        //self.flushable.push_back((stream_id, sent));
+-        *self.flushable.entry(size).or_insert(stream_id) = size;
++    pub fn push_flushable(&mut self, stream_id: u64) {
++        self.flushable.push_back(stream_id);
+     }
+ 
+     /// Removes and returns the first stream ID from the flushable streams
+@@ -241,35 +238,7 @@ impl StreamMap {
+     /// Note that if the stream is still flushable after sending some of its
+     /// outstanding data, it needs to be added back to the queu.
+     pub fn pop_flushable(&mut self) -> Option<u64> {
+-        let found = match self.find_first() {
+-            Some(v) => {
+-                debug!("found {}", v);
+-                self.flushable.remove(&v);
+-                Some(v)
+-            },
+-            None => None,
+-        };
+-        found
+-
+-        
+-        //self.flushable.pop_front()
+-
+-        // let stream = match self.streams.get_mut(stream_id) {
+-        //     Some(v) => v,
+-
+-        //     None => continue,
+-        // };
+-    }
+-
+-    fn find_first(&self) -> Option<u64> {
+-        let found = match self.flushable.iter().next() {
+-            Some(v) => {
+-                let (key, _) = v;
+-                Some(*key)
+-            },
+-            None => None,
+-        };
+-        found
++        self.flushable.pop_front()
+     }
+ 
+     /// Adds or removes the stream ID to/from the readable streams set.
+@@ -788,7 +757,7 @@ pub struct SendBuf {
+     off: u64,
+ 
+     /// The amount of data that was ever written to this stream.
+-    pub len: u64,
++    len: u64,
+ 
+     /// The maximum offset we are allowed to send to the peer.
+     max_data: u64,
